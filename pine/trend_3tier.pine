@@ -1,0 +1,188 @@
+//@version=6
+// 3단 추세 변곡 지표 — 장기(200 SMA) · 중기(50/200 교차) · 단기(20 EMA + ADX)
+// 원칙: 빨리 맞히기보다 덜 틀리기. 모든 신호는 봉 마감 후에만 확정 표시(리페인트 없음).
+// 권장: 일봉 차트. 다른 봉에서는 "200봉" 기준이 되므로 의미가 달라진다.
+// 신호 표시를 마우스로 클릭(모바일은 탭)하거나 올려두면 그 봉에서 신호가 나온 근거가 설명창으로 뜬다.
+indicator("3단 추세 변곡 [장기·중기·단기]", shorttitle = "추세변곡3단", overlay = true, max_labels_count = 500)
+
+// ── 입력 ─────────────────────────────────────────
+grpL      = "① 장기 — 방향"
+lenL      = input.int(200, "장기 이평 (SMA)", minval = 50, group = grpL)
+slopeBars = input.int(10, "기울기 비교 봉 수", minval = 1, group = grpL, tooltip = "이평 값이 N봉 전보다 높으면 기울기 상승")
+confirmL  = input.int(2, "확정에 필요한 연속 종가 수", minval = 1, group = grpL)
+
+grpM = "② 중기 — 타이밍"
+lenM = input.int(50, "중기 이평 (SMA)", minval = 10, group = grpM)
+
+grpS        = "③ 단기 — 진입 위치"
+lenS        = input.int(20, "단기 이평 (EMA)", minval = 5, group = grpS)
+adxLen      = input.int(14, "ADX 기간", minval = 2, group = grpS)
+adxTh       = input.float(22, "ADX 기준 (이상이면 추세)", minval = 5, group = grpS)
+sWithLong   = input.bool(true, "단기 신호는 장기 방향과 같을 때만", group = grpS)
+
+grpV   = "표시"
+showS  = input.bool(true, "단기 신호 표시", group = grpV)
+showBg = input.bool(true, "3단 정렬 배경", group = grpV)
+showTb = input.bool(true, "상태 표", group = grpV)
+
+// ── 계산 ─────────────────────────────────────────
+maL = ta.sma(close, lenL)
+maM = ta.sma(close, lenM)
+maS = ta.ema(close, lenS)
+[diP, diM, adx] = ta.dmi(adxLen, adxLen)
+
+slopeL = maL - maL[slopeBars]
+
+var int aboveRun = 0
+var int belowRun = 0
+aboveRun := close > maL ? aboveRun + 1 : 0
+belowRun := close < maL ? belowRun + 1 : 0
+
+// ① 장기: 가격 위치(연속 확정) + 기울기가 같은 방향일 때만 바뀐다
+var int stL = 0
+if aboveRun >= confirmL and slopeL > 0
+    stL := 1
+else if belowRun >= confirmL and slopeL < 0
+    stL := -1
+
+// ② 중기: 50선이 200선 위면 상승, 아래면 하락
+var int stM = 0
+if not na(maL)
+    stM := maM > maL ? 1 : maM < maL ? -1 : stM
+
+// ③ 단기: 20 EMA 위·아래 + ADX가 기준 이상이고 DI 방향이 같을 때만 바뀐다
+trendOK = adx >= adxTh
+var int stS = 0
+if close > maS and trendOK and diP > diM
+    stS := 1
+else if close < maS and trendOK and diM > diP
+    stS := -1
+
+// ── 변곡 신호 (봉 마감 확정) ───────────────────────
+cf  = barstate.isconfirmed
+lUp = cf and stL == 1 and stL[1] == -1
+lDn = cf and stL == -1 and stL[1] == 1
+mUp = cf and stM == 1 and stM[1] == -1
+mDn = cf and stM == -1 and stM[1] == 1
+sUp = cf and showS and stS == 1 and stS[1] == -1 and (not sWithLong or stL == 1)
+sDn = cf and showS and stS == -1 and stS[1] == 1 and (not sWithLong or stL == -1)
+
+alignUp = stL == 1 and stM == 1 and stS == 1
+alignDn = stL == -1 and stM == -1 and stS == -1
+
+// ── 그리기 ───────────────────────────────────────
+plot(maL, "장기 200 SMA", color = color.new(#1f3a93, 0), linewidth = 2)
+plot(maM, "중기 50 SMA", color = color.new(#8a5a00, 0), linewidth = 1)
+plot(maS, "단기 20 EMA", color = color.new(#666666, 0), linewidth = 1)
+
+bgcolor(showBg and alignUp ? color.new(#2e7d32, 92) : showBg and alignDn ? color.new(#c62828, 92) : na, title = "3단 정렬")
+
+// ── 상태 텍스트 ──────────────────────────────────
+stateText(int s) =>
+    s == 1 ? "상승" : s == -1 ? "하락" : "판정 대기"
+
+stateBg(int s) =>
+    s == 1 ? color.new(#dbe7fb, 0) : s == -1 ? color.new(#f6dcdc, 0) : color.new(#eeeeee, 0)
+
+// ── 신호 표시 + 근거 설명창 ────────────────────────
+// plotshape는 설명창(tooltip)을 지원하지 않으므로 label로 그린다.
+// 같은 봉에 여러 신호가 겹치면 방향별로 하나의 라벨에 합쳐 근거를 모두 보여준다.
+px(float v) =>
+    str.tostring(v, format.mintick)
+
+pct(float v) =>
+    (v >= 0 ? "+" : "") + str.tostring(v, "#.##") + "%"
+
+tipLong(bool up) =>
+    dist = (close / maL - 1) * 100
+    "【장기 " + (up ? "상승" : "하락") + "전환 — 200 SMA】" +
+     "\n· 종가 " + px(close) + " 가 200 SMA " + px(maL) + (up ? " 위" : " 아래") + "에서 " + str.tostring(up ? aboveRun : belowRun) + "봉 연속 마감 (기준 " + str.tostring(confirmL) + "봉)" +
+     "\n· 200 SMA 대비 " + pct(dist) +
+     "\n· 200 SMA 기울기 " + (up ? "상승" : "하락") + ": " + str.tostring(slopeBars) + "봉 전 " + px(maL[slopeBars]) + " → 현재 " + px(maL) + " (" + (slopeL >= 0 ? "+" : "") + px(slopeL) + ")" +
+     "\n· 장기 상태: " + (up ? "하락 → 상승" : "상승 → 하락") +
+     "\n→ 가격 위치와 기울기가 모두 " + (up ? "위" : "아래") + "쪽으로 확정되어 큰 방향이 바뀜"
+
+tipMid(bool up) =>
+    gap = (maM / maL - 1) * 100
+    "【중기 " + (up ? "골든크로스" : "데드크로스") + " — 50/200 SMA】" +
+     "\n· 50 SMA " + px(maM) + (up ? " > " : " < ") + "200 SMA " + px(maL) + " (차이 " + pct(gap) + ")" +
+     "\n· 직전 봉: 50 SMA " + px(maM[1]) + " / 200 SMA " + px(maL[1]) +
+     "\n· 중기 상태: " + (up ? "하락 → 상승" : "상승 → 하락") +
+     "\n→ 50선이 200선을 " + (up ? "상향" : "하향") + " 돌파해 중기 흐름이 " + (up ? "위" : "아래") + "로 전환"
+
+tipShort(bool up) =>
+    dist = (close / maS - 1) * 100
+    "【단기 " + (up ? "상승" : "하락") + "전환 — 20 EMA + ADX】" +
+     "\n· 종가 " + px(close) + (up ? " > " : " < ") + "20 EMA " + px(maS) + " (" + pct(dist) + ")" +
+     "\n· ADX " + str.tostring(adx, "#.0") + " ≥ 기준 " + str.tostring(adxTh, "#.0") + " → 추세 있음" +
+     "\n· " + (up ? "DI+ " + str.tostring(diP, "#.0") + " > DI- " + str.tostring(diM, "#.0") : "DI- " + str.tostring(diM, "#.0") + " > DI+ " + str.tostring(diP, "#.0")) +
+     (sWithLong ? "\n· 장기 방향 필터 통과 (장기 " + stateText(stL) + ")" : "") +
+     "\n· 단기 상태: " + (up ? "하락 → 상승" : "상승 → 하락") +
+     "\n→ 추세 힘이 붙은 상태에서 20 EMA를 " + (up ? "회복" : "이탈") + "함"
+
+tipFooter() =>
+    verdict = alignUp ? "3단 정렬 상승" : alignDn ? "3단 정렬 하락" : "혼조"
+    "\n\n── 이 봉 기준 3단 상태 ──" +
+     "\n장기 " + stateText(stL) + " · 중기 " + stateText(stM) + " · 단기 " + (trendOK ? stateText(stS) : "횡보") +
+     "\n종합: " + verdict
+
+drawSignal(bool isL, bool isM, bool isS, bool up) =>
+    if isL or isM or isS
+        txt = ""
+        tip = ""
+        if isL
+            txt += (up ? "장기▲" : "장기▼")
+            tip += tipLong(up)
+        if isM
+            txt += (txt == "" ? "" : "\n") + (up ? "중기▲" : "중기▼")
+            tip += (tip == "" ? "" : "\n\n") + tipMid(up)
+        if isS
+            tip += (tip == "" ? "" : "\n\n") + tipShort(up)
+        tip += tipFooter()
+        col = up ? #1f5fbf : #b23a3a
+        sty = isL ? (up ? label.style_label_up : label.style_label_down) : isM ? (up ? label.style_triangleup : label.style_triangledown) : label.style_circle
+        bg  = isL ? color.new(col, 0) : isM ? color.new(col, 0) : color.new(col, 30)
+        tc  = isL ? color.white : color.black
+        sz  = isL ? size.normal : isM ? size.small : size.tiny
+        label.new(bar_index, up ? low : high, txt, yloc = up ? yloc.belowbar : yloc.abovebar, color = bg, style = sty, textcolor = tc, size = sz, tooltip = tip)
+
+drawSignal(lUp, mUp, sUp, true)
+drawSignal(lDn, mDn, sDn, false)
+
+// 데이터 창·알림용 숨김 시리즈 (차트에는 그리지 않음)
+plot(lUp ? 1 : na, "장기 상승전환", display = display.data_window)
+plot(lDn ? 1 : na, "장기 하락전환", display = display.data_window)
+plot(mUp ? 1 : na, "중기 골든크로스", display = display.data_window)
+plot(mDn ? 1 : na, "중기 데드크로스", display = display.data_window)
+plot(sUp ? 1 : na, "단기 상승전환", display = display.data_window)
+plot(sDn ? 1 : na, "단기 하락전환", display = display.data_window)
+
+// ── 상태 표 ──────────────────────────────────────
+var table tb = table.new(position.top_right, 3, 5, bgcolor = color.white, frame_color = color.gray, frame_width = 1, border_color = color.new(color.gray, 50), border_width = 1)
+if showTb and barstate.islast
+    distL = (close / maL - 1) * 100
+    verdict = alignUp ? "3단 정렬 상승" : alignDn ? "3단 정렬 하락" : "혼조"
+    action  = alignUp ? "롱 우위" : stL == 1 ? "장기 상승 · 눌림 가능" : stL == -1 ? "롱 쉬기" : "판정 대기"
+    table.cell(tb, 0, 0, "구간", text_color = color.black, bgcolor = color.new(#f2f2f2, 0))
+    table.cell(tb, 1, 0, "상태", text_color = color.black, bgcolor = color.new(#f2f2f2, 0))
+    table.cell(tb, 2, 0, "근거", text_color = color.black, bgcolor = color.new(#f2f2f2, 0))
+    table.cell(tb, 0, 1, "① 장기", text_color = color.black)
+    table.cell(tb, 1, 1, stateText(stL), text_color = color.black, bgcolor = stateBg(stL))
+    table.cell(tb, 2, 1, "200선 대비 " + str.tostring(distL, "#.0") + "%", text_color = color.black)
+    table.cell(tb, 0, 2, "② 중기", text_color = color.black)
+    table.cell(tb, 1, 2, stateText(stM), text_color = color.black, bgcolor = stateBg(stM))
+    table.cell(tb, 2, 2, maM > maL ? "50선 > 200선" : "50선 < 200선", text_color = color.black)
+    table.cell(tb, 0, 3, "③ 단기", text_color = color.black)
+    table.cell(tb, 1, 3, trendOK ? stateText(stS) : "횡보", text_color = color.black, bgcolor = trendOK ? stateBg(stS) : color.new(#eeeeee, 0))
+    table.cell(tb, 2, 3, "ADX " + str.tostring(adx, "#.0") + (trendOK ? " (추세)" : " (약함)"), text_color = color.black)
+    table.cell(tb, 0, 4, "종합", text_color = color.black, bgcolor = color.new(#f2f2f2, 0))
+    table.cell(tb, 1, 4, verdict, text_color = color.black, bgcolor = color.new(#f2f2f2, 0))
+    table.cell(tb, 2, 4, action, text_color = color.black, bgcolor = color.new(#f2f2f2, 0))
+
+// ── 알림 ─────────────────────────────────────────
+alertcondition(lUp, "장기 상승전환", "{{ticker}} 장기 상승전환: 200선 위 확정 + 기울기 상승")
+alertcondition(lDn, "장기 하락전환", "{{ticker}} 장기 하락전환: 200선 아래 확정 + 기울기 하락")
+alertcondition(mUp, "중기 골든크로스", "{{ticker}} 중기 골든크로스: 50선이 200선 상향 돌파")
+alertcondition(mDn, "중기 데드크로스", "{{ticker}} 중기 데드크로스: 50선이 200선 하향 돌파")
+alertcondition(sUp, "단기 상승전환", "{{ticker}} 단기 상승전환: 20EMA 위 + ADX 추세")
+alertcondition(sDn, "단기 하락전환", "{{ticker}} 단기 하락전환: 20EMA 아래 + ADX 추세")
