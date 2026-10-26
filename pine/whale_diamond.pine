@@ -1,0 +1,152 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// Whale Diamond Signal (고래 다이아 시그널)
+//
+// 평소보다 비정상적으로 큰 거래량/거래대금(고래·세력의 대규모 자금 이동)이
+// 들어온 봉을 찾고, 그 자금의 방향(순매수/순매도)을 판단해서
+// 다이아몬드(◆)로 롱/숏 신호를 표시합니다.
+//
+//  · 초록 ◆ (봉 아래) : 롱  – 대량 매수 유입 or 저점에서 매도 물량 흡수
+//  · 빨강 ◆ (봉 위)   : 숏  – 대량 매도 유입 or 고점에서 매수 물량 흡수
+//  · 🐋 표시가 붙은 큰 ◆ : Z-Score 가 매우 높은 '대형 고래' 봉
+//
+// ※ 특정 유튜버의 비공개 지표를 그대로 복제한 것이 아니라,
+//   같은 컨셉(대규모 자금 이동 + 방향)을 직접 구현한 지표입니다.
+// ※ 투자 판단의 보조 도구일 뿐, 수익을 보장하지 않습니다.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("Whale Diamond Signal [고래 다이아]", shorttitle = "💎 Whale", overlay = true, max_labels_count = 500)
+
+// ── 입력값 ───────────────────────────────────────────────────────────────────
+grpV = "① 거래량 / 자금 스파이크"
+volLen  = input.int(20, "평균 기간", minval = 5, group = grpV)
+volMult = input.float(2.5, "거래량 배수 (평균 대비)", minval = 1.0, step = 0.1, group = grpV)
+zThresh = input.float(2.0, "Z-Score 임계값", minval = 0.5, step = 0.1, group = grpV)
+bigZ    = input.float(3.5, "대형 고래 Z-Score", minval = 1.0, step = 0.1, group = grpV)
+
+grpD = "② 자금 방향 판단"
+useLtf     = input.bool(true, "하위 타임프레임 체결 델타 사용 (정확도↑)", group = grpD)
+ltfInput   = input.timeframe("1", "하위 타임프레임", group = grpD)
+deltaRatio = input.float(0.25, "순매수/순매도 비율 임계 (0~1)", minval = 0.0, maxval = 1.0, step = 0.05, group = grpD)
+useAbsorb  = input.bool(true, "흡수(긴 꼬리) 반전 신호 사용", group = grpD)
+wickRatio  = input.float(0.5, "꼬리 비율 (캔들 전체 대비)", minval = 0.1, maxval = 0.9, step = 0.05, group = grpD)
+swingLen   = input.int(10, "저점/고점 확인 기간", minval = 2, group = grpD)
+
+grpF = "③ 필터"
+useTrend   = input.bool(false, "EMA 추세 필터 (롱=EMA 위, 숏=EMA 아래)", group = grpF)
+emaLen     = input.int(200, "EMA 기간", minval = 1, group = grpF)
+cooldown   = input.int(5, "신호 간 최소 봉 수", minval = 0, group = grpF)
+confirmBar = input.bool(true, "봉 마감 후 확정 (리페인트 방지)", group = grpF)
+
+grpS = "④ 표시"
+showLabels = input.bool(false, "상세 정보 라벨 (마우스 오버)", group = grpS)
+colorSpike = input.bool(true, "스파이크 봉 색칠", group = grpS)
+longCol    = input.color(#00E676, "롱 색상", group = grpS)
+shortCol   = input.color(#FF1744, "숏 색상", group = grpS)
+
+// ── 1. 거래량 / 거래대금 스파이크 ────────────────────────────────────────────
+// 현재 봉이 평균을 끌어올리지 않도록 '직전 봉까지'의 통계와 비교
+dollarVol = hlc3 * volume
+volAvg    = ta.sma(volume, volLen)[1]
+volStd    = ta.stdev(volume, volLen)[1]
+dvAvg     = ta.sma(dollarVol, volLen)[1]
+dvStd     = ta.stdev(dollarVol, volLen)[1]
+
+volZ = nz(volStd) > 0 ? (volume - volAvg) / volStd : 0.0
+dvZ  = nz(dvStd) > 0 ? (dollarVol - dvAvg) / dvStd : 0.0
+whaleZ = math.max(volZ, dvZ)
+
+isSpike = volume > nz(volAvg) * volMult and whaleZ >= zThresh
+isBig   = isSpike and whaleZ >= bigZ
+
+// ── 2. 자금 방향 (순매수 / 순매도 비율) ─────────────────────────────────────
+// 하위 타임프레임 봉들의 양봉/음봉 거래량으로 체결 델타를 근사
+ltf = useLtf and timeframe.in_seconds(ltfInput) < timeframe.in_seconds() ? ltfInput : timeframe.period
+[ltfO, ltfC, ltfV] = request.security_lower_tf(syminfo.tickerid, ltf, [open, close, volume])
+
+float upV = 0.0
+float dnV = 0.0
+int n = array.size(ltfV)
+if useLtf and n > 0
+    for i = 0 to n - 1
+        v = array.get(ltfV, i)
+        o = array.get(ltfO, i)
+        c = array.get(ltfC, i)
+        if c > o
+            upV += v
+        else if c < o
+            dnV += v
+        else
+            upV += v * 0.5
+            dnV += v * 0.5
+else
+    // 대체 방식: 캔들 내 종가 위치로 매수/매도 거래량 추정
+    rngTmp = high - low
+    buyPart = rngTmp > 0 ? (close - low) / rngTmp : 0.5
+    upV := volume * buyPart
+    dnV := volume - upV
+
+totV     = upV + dnV
+deltaPct = totV > 0 ? (upV - dnV) / totV : 0.0
+
+// ── 3. 캔들 구조 (흡수 / 반전) ──────────────────────────────────────────────
+rng       = high - low
+bodyTop   = math.max(open, close)
+bodyBot   = math.min(open, close)
+lowerWick = bodyBot - low
+upperWick = high - bodyTop
+atSwingLo = low <= ta.lowest(low, swingLen)
+atSwingHi = high >= ta.highest(high, swingLen)
+
+// 대량 매수/매도 '돌파형' 신호
+impulseLong  = isSpike and deltaPct >= deltaRatio and close > open
+impulseShort = isSpike and deltaPct <= -deltaRatio and close < open
+
+// 저점/고점에서 큰 물량을 받아내는 '흡수형' 반전 신호
+absorbLong  = useAbsorb and isSpike and atSwingLo and rng > 0 and lowerWick >= rng * wickRatio and close >= low + rng * 0.5
+absorbShort = useAbsorb and isSpike and atSwingHi and rng > 0 and upperWick >= rng * wickRatio and close <= low + rng * 0.5
+
+// ── 4. 필터 & 최종 신호 ─────────────────────────────────────────────────────
+emaLine   = ta.ema(close, emaLen)
+trendLong = not useTrend or close > emaLine
+trendShrt = not useTrend or close < emaLine
+
+rawLong  = (impulseLong or absorbLong) and trendLong
+rawShort = (impulseShort or absorbShort) and trendShrt
+// 같은 봉에서 양방향이 동시에 나오면 신호 무시
+if rawLong and rawShort
+    rawLong  := false
+    rawShort := false
+
+var int lastSigBar = na
+cooled  = na(lastSigBar) or bar_index - lastSigBar > cooldown
+barOk   = not confirmBar or barstate.isconfirmed
+
+longSig  = rawLong and cooled and barOk
+shortSig = rawShort and cooled and barOk
+
+if longSig or shortSig
+    lastSigBar := bar_index
+
+// ── 5. 표시 ─────────────────────────────────────────────────────────────────
+plotshape(longSig and not isBig,  "롱 ◆",        shape.diamond, location.belowbar, longCol,  size = size.small)
+plotshape(longSig and isBig,      "롱 ◆ (고래)", shape.diamond, location.belowbar, longCol,  size = size.normal, text = "🐋", textcolor = longCol)
+plotshape(shortSig and not isBig, "숏 ◆",        shape.diamond, location.abovebar, shortCol, size = size.small)
+plotshape(shortSig and isBig,     "숏 ◆ (고래)", shape.diamond, location.abovebar, shortCol, size = size.normal, text = "🐋", textcolor = shortCol)
+
+plot(useTrend ? emaLine : na, "EMA", color.new(color.gray, 30), 1)
+
+barcolor(colorSpike and isSpike ? (deltaPct >= 0 ? color.new(longCol, 0) : color.new(shortCol, 0)) : na, title = "스파이크 봉")
+
+if showLabels and (longSig or shortSig)
+    tip = (longSig ? "롱" : "숏") + (absorbLong or absorbShort ? " (흡수형)" : " (돌파형)") +
+          "\n거래량: 평균의 " + str.tostring(volume / nz(volAvg, volume), "#.##") + "배" +
+          "\nZ-Score: " + str.tostring(whaleZ, "#.##") +
+          "\n순매수 비율: " + str.tostring(deltaPct * 100, "#.#") + "%"
+    label.new(bar_index, longSig ? low : high, "",
+              style = longSig ? label.style_label_up : label.style_label_down,
+              color = color.new(color.white, 100), size = size.tiny, tooltip = tip)
+
+// ── 6. 알림 ─────────────────────────────────────────────────────────────────
+alertcondition(longSig,  "💎 고래 롱",  "고래 다이아 롱 신호: {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSig, "💎 고래 숏",  "고래 다이아 숏 신호: {{ticker}} {{interval}} @ {{close}}")
+alertcondition(longSig or shortSig, "💎 고래 신호 (전체)", "고래 다이아 신호: {{ticker}} {{interval}} @ {{close}}")
