@@ -10,11 +10,14 @@
 //  · 빨강 ◆ (봉 위)   : 숏  – 대량 매도 유입 or 고점에서 매수 물량 흡수
 //  · 🐋 표시가 붙은 큰 ◆ : Z-Score 가 매우 높은 '대형 고래' 봉
 //
-// ※ 특정 유튜버의 비공개 지표를 그대로 복제한 것이 아니라,
-//   같은 컨셉(대규모 자금 이동 + 방향)을 직접 구현한 지표입니다.
+// [구름대] 이평선 + 엔벨로프 밴드로 만든 멀티 타임프레임 지지/저항 구름 3개
+//  · 가격이 구름 위 = 초록(지지), 구름 아래 = 빨강(저항), 구름 안 = 회색
+//
+// ※ 특정 유튜버의 비공개 지표(ATH BASE 등)를 그대로 복제한 것이 아니라,
+//   같은 컨셉(대규모 자금 이동 + 방향, 이평선 기반 구름대)을 직접 구현한 지표입니다.
 // ※ 투자 판단의 보조 도구일 뿐, 수익을 보장하지 않습니다.
 // ─────────────────────────────────────────────────────────────────────────────
-indicator("Whale Diamond Signal [고래 다이아]", shorttitle = "💎 Whale", overlay = true, max_labels_count = 500)
+indicator("Whale Diamond Signal + Cloud [고래 다이아 + 구름대]", shorttitle = "💎 Whale+Cloud", overlay = true, max_labels_count = 500)
 
 // ── 입력값 ───────────────────────────────────────────────────────────────────
 grpV = "① 거래량 / 자금 스파이크"
@@ -36,12 +39,32 @@ useTrend   = input.bool(false, "EMA 추세 필터 (롱=EMA 위, 숏=EMA 아래)"
 emaLen     = input.int(200, "EMA 기간", minval = 1, group = grpF)
 cooldown   = input.int(5, "신호 간 최소 봉 수", minval = 0, group = grpF)
 confirmBar = input.bool(true, "봉 마감 후 확정 (리페인트 방지)", group = grpF)
+cloudFilt  = input.string("사용 안 함", "구름대 필터 (롱=구름 위, 숏=구름 아래)", options = ["사용 안 함", "구름 1", "구름 2", "구름 3"], group = grpF)
 
 grpS = "④ 표시"
 showLabels = input.bool(false, "상세 정보 라벨 (마우스 오버)", group = grpS)
 colorSpike = input.bool(true, "스파이크 봉 색칠", group = grpS)
 longCol    = input.color(#00E676, "롱 색상", group = grpS)
 shortCol   = input.color(#FF1744, "숏 색상", group = grpS)
+
+grpC = "⑤ 구름대"
+showCloud = input.bool(true, "구름대 표시", group = grpC)
+maType    = input.string("EMA", "이평선 종류", options = ["EMA", "SMA", "WMA", "HMA", "VWMA"], group = grpC)
+c1On  = input.bool(true, "구름 1", inline = "c1", group = grpC)
+c1Tf  = input.timeframe("", "", inline = "c1", group = grpC)
+c1Len = input.int(60, "기간", minval = 1, inline = "c1", group = grpC)
+c1Pct = input.float(0.5, "폭%", minval = 0.0, step = 0.1, inline = "c1", group = grpC)
+c2On  = input.bool(true, "구름 2", inline = "c2", group = grpC)
+c2Tf  = input.timeframe("240", "", inline = "c2", group = grpC)
+c2Len = input.int(60, "기간", minval = 1, inline = "c2", group = grpC)
+c2Pct = input.float(1.0, "폭%", minval = 0.0, step = 0.1, inline = "c2", group = grpC)
+c3On  = input.bool(true, "구름 3", inline = "c3", group = grpC)
+c3Tf  = input.timeframe("D", "", inline = "c3", group = grpC)
+c3Len = input.int(60, "기간", minval = 1, inline = "c3", group = grpC)
+c3Pct = input.float(2.0, "폭%", minval = 0.0, step = 0.1, inline = "c3", group = grpC)
+bullCloud = input.color(#26A69A, "지지(가격 위) 색상", group = grpC)
+bearCloud = input.color(#EF5350, "저항(가격 아래) 색상", group = grpC)
+neutCloud = input.color(#9E9E9E, "구름 안 색상", group = grpC)
 
 // ── 1. 거래량 / 거래대금 스파이크 ────────────────────────────────────────────
 // 현재 봉이 평균을 끌어올리지 않도록 '직전 봉까지'의 통계와 비교
@@ -105,10 +128,50 @@ impulseShort = isSpike and deltaPct <= -deltaRatio and close < open
 absorbLong  = useAbsorb and isSpike and atSwingLo and rng > 0 and lowerWick >= rng * wickRatio and close >= low + rng * 0.5
 absorbShort = useAbsorb and isSpike and atSwingHi and rng > 0 and upperWick >= rng * wickRatio and close <= low + rng * 0.5
 
-// ── 4. 필터 & 최종 신호 ─────────────────────────────────────────────────────
+// ── 4. 구름대 (이평선 + 엔벨로프, 멀티 타임프레임) ──────────────────────────
+f_ma(src, len, t) =>
+    e = ta.ema(src, len)
+    s = ta.sma(src, len)
+    w = ta.wma(src, len)
+    h = ta.hma(src, len)
+    v = ta.vwma(src, len)
+    switch t
+        "SMA"  => s
+        "WMA"  => w
+        "HMA"  => h
+        "VWMA" => v
+        => e
+
+// 차트보다 낮은 타임프레임은 쓸 수 없으므로 차트 타임프레임으로 대체
+f_tf(tf) => tf == "" or timeframe.in_seconds(tf) < timeframe.in_seconds() ? timeframe.period : tf
+
+// 상위 타임프레임은 '마감된 봉' 값만 사용해서 리페인트 방지
+f_cloudMid(tf, len) =>
+    t     = f_tf(tf)
+    local = f_ma(close, len, maType)
+    htf   = request.security(syminfo.tickerid, t, f_ma(close, len, maType)[1], lookahead = barmerge.lookahead_on)
+    t == timeframe.period ? local : htf
+
+c1Mid = f_cloudMid(c1Tf, c1Len)
+c2Mid = f_cloudMid(c2Tf, c2Len)
+c3Mid = f_cloudMid(c3Tf, c3Len)
+c1Up  = c1Mid * (1 + c1Pct / 100)
+c1Dn  = c1Mid * (1 - c1Pct / 100)
+c2Up  = c2Mid * (1 + c2Pct / 100)
+c2Dn  = c2Mid * (1 - c2Pct / 100)
+c3Up  = c3Mid * (1 + c3Pct / 100)
+c3Dn  = c3Mid * (1 - c3Pct / 100)
+
+f_cloudCol(up, dn) => close > up ? bullCloud : close < dn ? bearCloud : neutCloud
+
+// ── 5. 필터 & 최종 신호 ─────────────────────────────────────────────────────
 emaLine   = ta.ema(close, emaLen)
-trendLong = not useTrend or close > emaLine
-trendShrt = not useTrend or close < emaLine
+filtUp    = cloudFilt == "구름 1" ? c1Up : cloudFilt == "구름 2" ? c2Up : cloudFilt == "구름 3" ? c3Up : na
+filtDn    = cloudFilt == "구름 1" ? c1Dn : cloudFilt == "구름 2" ? c2Dn : cloudFilt == "구름 3" ? c3Dn : na
+cloudLong = cloudFilt == "사용 안 함" or close > filtUp
+cloudShrt = cloudFilt == "사용 안 함" or close < filtDn
+trendLong = (not useTrend or close > emaLine) and cloudLong
+trendShrt = (not useTrend or close < emaLine) and cloudShrt
 
 rawLong  = (impulseLong or absorbLong) and trendLong
 rawShort = (impulseShort or absorbShort) and trendShrt
@@ -127,7 +190,17 @@ shortSig = rawShort and cooled and barOk
 if longSig or shortSig
     lastSigBar := bar_index
 
-// ── 5. 표시 ─────────────────────────────────────────────────────────────────
+// ── 6. 표시 ─────────────────────────────────────────────────────────────────
+p1u = plot(showCloud and c1On ? c1Up : na, "구름 1 상단", color.new(f_cloudCol(c1Up, c1Dn), 50), 1)
+p1d = plot(showCloud and c1On ? c1Dn : na, "구름 1 하단", color.new(f_cloudCol(c1Up, c1Dn), 50), 1)
+p2u = plot(showCloud and c2On ? c2Up : na, "구름 2 상단", color.new(f_cloudCol(c2Up, c2Dn), 55), 1)
+p2d = plot(showCloud and c2On ? c2Dn : na, "구름 2 하단", color.new(f_cloudCol(c2Up, c2Dn), 55), 1)
+p3u = plot(showCloud and c3On ? c3Up : na, "구름 3 상단", color.new(f_cloudCol(c3Up, c3Dn), 60), 2)
+p3d = plot(showCloud and c3On ? c3Dn : na, "구름 3 하단", color.new(f_cloudCol(c3Up, c3Dn), 60), 2)
+fill(p1u, p1d, color.new(f_cloudCol(c1Up, c1Dn), 80), "구름 1")
+fill(p2u, p2d, color.new(f_cloudCol(c2Up, c2Dn), 84), "구름 2")
+fill(p3u, p3d, color.new(f_cloudCol(c3Up, c3Dn), 88), "구름 3")
+
 plotshape(longSig and not isBig,  "롱 ◆",        shape.diamond, location.belowbar, longCol,  size = size.small)
 plotshape(longSig and isBig,      "롱 ◆ (고래)", shape.diamond, location.belowbar, longCol,  size = size.normal, text = "🐋", textcolor = longCol)
 plotshape(shortSig and not isBig, "숏 ◆",        shape.diamond, location.abovebar, shortCol, size = size.small)
@@ -146,7 +219,11 @@ if showLabels and (longSig or shortSig)
               style = longSig ? label.style_label_up : label.style_label_down,
               color = color.new(color.white, 100), size = size.tiny, tooltip = tip)
 
-// ── 6. 알림 ─────────────────────────────────────────────────────────────────
+// ── 7. 알림 ─────────────────────────────────────────────────────────────────
 alertcondition(longSig,  "💎 고래 롱",  "고래 다이아 롱 신호: {{ticker}} {{interval}} @ {{close}}")
 alertcondition(shortSig, "💎 고래 숏",  "고래 다이아 숏 신호: {{ticker}} {{interval}} @ {{close}}")
 alertcondition(longSig or shortSig, "💎 고래 신호 (전체)", "고래 다이아 신호: {{ticker}} {{interval}} @ {{close}}")
+alertcondition(ta.crossover(close, c1Up),  "☁ 구름 1 상향 돌파", "구름 1 상향 돌파: {{ticker}} {{interval}} @ {{close}}")
+alertcondition(ta.crossunder(close, c1Dn), "☁ 구름 1 하향 이탈", "구름 1 하향 이탈: {{ticker}} {{interval}} @ {{close}}")
+alertcondition(ta.crossover(close, c2Up),  "☁ 구름 2 상향 돌파", "구름 2 상향 돌파: {{ticker}} {{interval}} @ {{close}}")
+alertcondition(ta.crossunder(close, c2Dn), "☁ 구름 2 하향 이탈", "구름 2 하향 이탈: {{ticker}} {{interval}} @ {{close}}")
